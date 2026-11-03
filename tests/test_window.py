@@ -86,7 +86,11 @@ def test_skip_red_jumps_over_a_red_section(window):
     window.player.seek(0.0)
     QTest.qWait(200)
     window.toggle_play()
-    QTest.qWait(700)
+    # if the fast copy swaps in right now, playing starts a moment later: a real hang still fails
+    for _ in range(60):
+        if window.player.time >= 2.0:
+            break
+        QTest.qWait(50)
     assert window.player.time >= 2.0
     window.toggle_play()
 
