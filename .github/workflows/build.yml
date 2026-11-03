@@ -93,14 +93,16 @@ jobs:
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Check both builds came through
+        run: ls -l dist/ugc-cutter-setup.exe dist/ugc-cutter
       - name: Publish the release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
