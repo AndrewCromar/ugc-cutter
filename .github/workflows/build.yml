@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            file: ugc-cutter.exe
+          - os: ubuntu-22.04
+            file: ugc-cutter
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libpulse0 libfontconfig1 libglib2.0-0
+      - name: Install
+        run: pip install -r requirements.txt pyinstaller pytest
+      - name: Tests
+        run: python -m pytest -q tests
+      - name: Build
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name ugc-cutter run.py
+      - name: Test the finished app with HEVC iPhone-style clips
+        shell: bash
+        run: |
+          status=0
+          UGC_SELF_TEST_LOG=self-test.log "dist/${{ matrix.file }}" --self-test tests/fixtures || status=$?
+          cat self-test.log || true
+          exit $status
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the latest build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/ugc-cutter.exe dist/ugc-cutter --title "Latest build" --notes "Built from ${{ github.sha }}."
