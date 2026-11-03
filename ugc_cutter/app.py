@@ -3,18 +3,21 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QStandardPaths, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QScrollBar, QVBoxLayout, QWidget)
 from PySide6.QtCore import QPointF
 
+from . import update
 from .model import CUTS_FILE, ENVELOPE_RATE, Clip, CutList
+from .version import VERSION
 
 FRAME = 1 / 30
 LINE_GRAB_PX = 6  # a right click this close to a placed line removes it
@@ -30,6 +33,40 @@ PLAYHEAD = QColor(255, 214, 10)
 def clock(t):
     t = max(0.0, t)
     return f"{int(t // 60)}:{t % 60:05.2f}"
+
+
+class UpdateTasks(QObject):
+    """Update work runs on throwaway background threads, so closing the app mid-check can't crash it:
+    these threads simply end with the program."""
+    found = Signal(object)
+    progress = Signal(int)
+    downloaded = Signal(object)
+    failed = Signal(str)
+
+    def check(self):
+        threading.Thread(target=self._check, daemon=True).start()
+
+    def _check(self):
+        newer = update.check_latest(VERSION)
+        if newer:
+            self._emit(self.found, newer)
+
+    def download(self, url, path):
+        threading.Thread(target=self._download, args=(url, path), daemon=True).start()
+
+    def _download(self, url, path):
+        try:
+            update.download(url, path, lambda percent: self._emit(self.progress, percent))
+            self._emit(self.downloaded, path)
+        except OSError as e:
+            self._emit(self.failed, str(e))
+
+    @staticmethod
+    def _emit(signal, value):
+        try:
+            signal.emit(value)
+        except RuntimeError:  # the window has already closed
+            pass
 
 
 def worker_command():
@@ -534,12 +571,16 @@ class MainWindow(QMainWindow):
         self.summary = QLabel("")
         self.fast_label = QLabel("")
         self.fast_label.setStyleSheet("color: #888;")
-        for w in (open_button, self.play_button, self.skip_box, fit_button, self.save_button):
+        self.update_button = QPushButton("Update available")
+        self.update_button.hide()
+        self.update_button.clicked.connect(self.install_update)
+        for w in (open_button, self.play_button, self.skip_box, fit_button, self.save_button, self.update_button):
             w.setFocusPolicy(Qt.NoFocus)
 
         row = QHBoxLayout()
         for w in (open_button, self.play_button, self.time_label, self.skip_box, fit_button):
             row.addWidget(w)
+        row.addWidget(self.update_button)
         row.addStretch(1)
         row.addWidget(self.fast_label)
         row.addWidget(self.summary)
@@ -565,6 +606,44 @@ class MainWindow(QMainWindow):
                              ("Shift+Right", lambda: self.nudge(1)), ("Ctrl+S", self.save), ("Ctrl+Z", self.undo),
                              ("Ctrl+Shift+Z", self.redo), ("Ctrl+Y", self.redo), ("Ctrl+O", self.choose_folder)):
             QShortcut(QKeySequence(keys), self, activated=action, context=Qt.ApplicationShortcut)
+
+        self.newer = None
+        self.updates = UpdateTasks(self)
+        self.updates.found.connect(self._on_update_found)
+        self.updates.progress.connect(lambda percent: self.update_button.setText(f"Downloading {percent}%"))
+        self.updates.failed.connect(self._on_update_failed)
+        self.updates.downloaded.connect(self._run_installer)
+        self.updates.check()
+
+    # --- updating
+    def _on_update_found(self, newer):
+        self.newer = newer
+        self.update_button.setToolTip(f"Version {newer['version']} is available. You have {VERSION}.")
+        self.update_button.show()
+
+    def install_update(self):
+        """On Windows, fetch the installer and run it, which reopens the app. Elsewhere, show the release page."""
+        if not (sys.platform == "win32" and getattr(sys, "frozen", False) and self.newer.get("installer_url")):
+            QDesktopServices.openUrl(QUrl(update.RELEASES_PAGE))
+            return
+        if not self.confirm_discard():
+            return
+        path = Path(tempfile.gettempdir()) / update.INSTALLER_NAME
+        self.update_button.setEnabled(False)
+        self.updates.download(self.newer["installer_url"], path)
+
+    def _on_update_failed(self, error):
+        self.update_button.setEnabled(True)
+        self.update_button.setText("Update available")
+        self.statusBar().showMessage(f"Couldn't download the update: {error}")
+
+    def _run_installer(self, path):
+        if not QProcess.startDetached(str(path), ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]):
+            self._on_update_failed("the installer wouldn't start")
+            return
+        if self.cuts:
+            self.cuts.dirty = False  # already saved or discarded when the button was clicked
+        self.close()
 
     # --- opening
     def choose_folder(self):

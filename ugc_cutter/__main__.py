@@ -64,6 +64,8 @@ def self_test(folder):
         print(f"frames: {results['frames']}  size: {results['size']}  rotation: {results['rotation']}  "
               f"reached: {results['time']} s  errors: {results['errors']}")
         print(text)
+        from .version import VERSION
+        results["version"] = VERSION
         results["ok"] = (results["frames"] > 0 and not results["errors"] and "cut\t" in text
                          and results.get("fast") and results["time"] > 2.2)
         window.close()

@@ -4,12 +4,16 @@ Cut phone footage on a simple timeline, then hand the cut points to the editor a
 
 ## Get it
 
-Download from [the latest release](../../releases/tag/latest):
+Download from [the latest release](../../releases/latest):
 
-- **Windows:** `ugc-cutter.exe`. Windows may warn about an unknown app the first time: choose More info, then Run anyway. It takes a few seconds to start.
+- **Windows:** `ugc-cutter-setup.exe`. Run it and it installs for your user, with no admin password. Windows may warn about an unknown app the first time: choose More info, then Run anyway.
 - **Linux:** `ugc-cutter`. Run `chmod +x ugc-cutter` once.
 
-Every push builds and tests both. A push to `main` also replaces that release. Pushes to `dev` only keep the builds on their Actions run, to try before merging.
+Every push builds and tests both, including installing and uninstalling on Windows. A push to `main` also publishes a new release. Pushes to `dev` only keep their builds on the Actions run, to try before merging.
+
+## Updates
+
+The app checks for a newer release when it opens. If there is one, a small **Update available** button appears next to the other buttons, and nothing changes until you click it. On Windows it downloads the new installer, installs it and reopens the app. If it can't reach GitHub, or the repo is private, you just don't see the button.
 
 ## Use it
 
@@ -55,8 +59,3 @@ python -m pytest tests      # add pytest first
 ## How playback stays fast
 
 Phone HEVC video is slow to jump around in, and switching between files takes over a second. So when you open a folder, the app makes one small copy of the whole timeline in the background. The label next to Keeping shows its progress, and it takes over when ready. The copy only affects playback: cuts are saved against your original clips, and the copy is kept in your user cache folder, never next to your footage. All video reading runs in a separate worker process, so the window stays responsive.
-
-## To do
-
-- An Update button that installs the latest build from GitHub.
-- An easy installer.

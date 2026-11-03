@@ -8,16 +8,15 @@ on:
 permissions:
   contents: write
 
+env:
+  APP_VERSION: 1.0.${{ github.run_number }}
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            file: ugc-cutter.exe
-          - os: ubuntu-22.04
-            file: ugc-cutter
+        os: [windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     env:
       QT_QPA_PLATFORM: offscreen
@@ -33,19 +32,56 @@ jobs:
         run: pip install -r requirements.txt pyinstaller pytest
       - name: Tests
         run: python -m pytest -q tests
-      - name: Build
+      - name: Stamp the version
+        shell: bash
+        run: echo "VERSION = \"$APP_VERSION\"" > ugc_cutter/version.py
+
+      - name: Build for Linux
+        if: runner.os == 'Linux'
         run: python -m PyInstaller --noconfirm --onefile --windowed --name ugc-cutter run.py
-      - name: Test the finished app with HEVC iPhone-style clips
+      - name: Test the Linux app with HEVC iPhone-style clips
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           status=0
-          UGC_SELF_TEST_LOG=self-test.log "dist/${{ matrix.file }}" --self-test tests/fixtures || status=$?
+          UGC_SELF_TEST_LOG=self-test.log dist/ugc-cutter --self-test tests/fixtures || status=$?
           cat self-test.log || true
+          grep -q "$APP_VERSION" self-test.log || status=1
           exit $status
+
+      - name: Build for Windows
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --noconfirm --onedir --windowed --name ugc-cutter run.py
+      - name: Make the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" installer\ugc-cutter.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install it and test the installed app with HEVC iPhone-style clips
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "installed"
+          $setup = Start-Process dist\ugc-cutter-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=`"$dir`"" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { Write-Error "installer failed: $($setup.ExitCode)"; exit 1 }
+          Stop-Process -Name ugc-cutter -Force -ErrorAction SilentlyContinue
+          $env:UGC_SELF_TEST_LOG = "$PWD\self-test.log"
+          $test = Start-Process "$dir\ugc-cutter.exe" -ArgumentList "--self-test","tests\fixtures" -Wait -PassThru
+          Get-Content self-test.log
+          if ($test.ExitCode -ne 0) { Write-Error "self test failed: $($test.ExitCode)"; exit 1 }
+          if (-not (Select-String -Path self-test.log -SimpleMatch $env:APP_VERSION)) { Write-Error "wrong version"; exit 1 }
+          $uninstall = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { Write-Error "uninstaller failed"; exit 1 }
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.file }}
-          path: dist/${{ matrix.file }}
+          name: ugc-cutter-${{ runner.os }}
+          path: |
+            dist/ugc-cutter-setup.exe
+            dist/ugc-cutter
+          if-no-files-found: error
 
   release:
     needs: build
@@ -56,10 +92,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish the latest build
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/ugc-cutter.exe dist/ugc-cutter --title "Latest build" --notes "Built from ${{ github.sha }}."
+        run: gh release create "v$APP_VERSION" dist/ugc-cutter-setup.exe dist/ugc-cutter --latest --title "UGC Cutter $APP_VERSION" --notes "Built from ${{ github.sha }}."
