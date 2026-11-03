@@ -370,6 +370,10 @@ class Player(QObject):
         self.proxies = {}  # clip index -> fast-playback copy
         self.merged = None  # all the clips as one fast file: the timeline time is the file's time
         self.opening = False
+        self.open_timer = QTimer(self)
+        self.open_timer.setSingleShot(True)
+        self.open_timer.setInterval(300)
+        self.open_timer.timeout.connect(self._open_check)
         self.settle_target = None
         self.settle_timer = QTimer(self)
         self.settle_timer.setSingleShot(True)
@@ -417,10 +421,23 @@ class Player(QObject):
         self.pending = position
         self.opening = True
         self.media.setSource(QUrl.fromLocalFile(str(path)))
+        if self.media.mediaStatus() == QMediaPlayer.LoadingMedia:
+            self.opening = False  # already loading the last file, so no new "loading" report would come
         if self.want_play:
             self.media.play()
         else:
             self.media.pause()  # a paused player that wasn't told again after a new file never shows a frame
+        self.open_timer.start()
+
+    def _open_check(self):
+        """If the player stayed quiet about loading, don't wait on it forever: the file is open by now."""
+        if self.pending is None:
+            return
+        if self.media.mediaStatus() in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            self.opening = False
+            self._on_status(self.media.mediaStatus())
+        else:
+            self.open_timer.start()
 
     def _settle(self):
         """A position set in the moment a file opens can be lost, so check that it landed."""

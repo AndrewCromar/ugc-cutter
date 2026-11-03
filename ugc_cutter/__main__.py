@@ -95,7 +95,7 @@ def main():
     app.setApplicationName("ugc-cutter")
     apply_dark_theme(app)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     if args:
         window.open_folder(args[0])
     return app.exec()

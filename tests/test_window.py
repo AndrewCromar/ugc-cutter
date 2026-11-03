@@ -73,8 +73,7 @@ def test_play_shows_frames_and_carries_on_into_the_next_clip(window):
     QTest.qWait(200)
     window.toggle_play()
     assert window.player.playing
-    QTest.qWait(1500)
-    assert window.player.time > 2.2  # past the end of the first clip, which is 2 s long
+    wait_until(lambda: window.player.time > 2.2)  # past the end of the first clip, which is 2 s long
     assert frames
     window.toggle_play()
     assert not window.player.playing
@@ -125,6 +124,15 @@ def test_wheel_zoom_keeps_the_time_under_the_pointer(window):
     assert abs(window.timeline.t_of(pos.x()) - before) < 0.01
 
 
+def wait_until(condition, seconds=3):
+    """Files take a moment to open, more on a busy machine: wait for the result, and fail if it never comes."""
+    for _ in range(seconds * 20):
+        if condition():
+            return
+        QTest.qWait(50)
+    assert condition()
+
+
 def wait_for_fast_playback(window, seconds=30):
     for _ in range(seconds * 20):
         if window.player.merged:
@@ -139,10 +147,9 @@ def test_fast_copy_swaps_in_and_timeline_positions_still_land_right(window):
     wait_for_fast_playback(window)
     assert window.fast_label.text() == "Fast playback ready"
     assert abs(window.player.time - 3.0) < 0.05
-    assert abs(window.player.media.position() / 1000 - 3.0) < 0.1  # 1 s into the second clip
+    wait_until(lambda: abs(window.player.media.position() / 1000 - 3.0) < 0.1)  # 1 s into the second clip
     window.player.seek(1.0)
-    QTest.qWait(200)
-    assert abs(window.player.media.position() / 1000 - 1.0) < 0.1
+    wait_until(lambda: abs(window.player.media.position() / 1000 - 1.0) < 0.1)
 
 
 def test_fast_copy_plays_across_clips_and_skips_red(window):
@@ -152,8 +159,7 @@ def test_fast_copy_plays_across_clips_and_skips_red(window):
     window.player.seek(0.0)
     QTest.qWait(200)
     window.toggle_play()
-    QTest.qWait(600)
-    assert window.player.time > 2.0
+    wait_until(lambda: window.player.time > 2.0)
     window.toggle_play()
 
 
@@ -162,8 +168,7 @@ def test_playing_to_the_very_end_stops_cleanly(window):
     window.player.seek(window.cuts.total - 0.3)
     QTest.qWait(200)
     window.toggle_play()
-    QTest.qWait(900)
-    assert not window.player.playing
+    wait_until(lambda: not window.player.playing)
 
 
 def test_without_fast_copies_it_still_plays_clip_by_clip(app, tmp_path, monkeypatch):
@@ -177,8 +182,7 @@ def test_without_fast_copies_it_still_plays_clip_by_clip(app, tmp_path, monkeypa
     w.player.seek(1.5)
     QTest.qWait(300)
     w.toggle_play()
-    QTest.qWait(1500)
-    assert w.player.clip_index == 1
+    wait_until(lambda: w.player.clip_index == 1)
     assert w.player.merged is None
     w.toggle_play()
     w.cuts.dirty = False
