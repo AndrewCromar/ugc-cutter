@@ -84,12 +84,11 @@ jobs:
           if (-not $uninstall.WaitForExit(120000)) { Write-Error "uninstaller took too long"; exit 1 }
           if ($uninstall.ExitCode -ne 0) { Write-Error "uninstaller failed"; exit 1 }
 
+      # only what gets published: on Windows dist/ugc-cutter is the whole app folder, already inside the installer
       - uses: actions/upload-artifact@v4
         with:
           name: ugc-cutter-${{ runner.os }}
-          path: |
-            dist/ugc-cutter-setup.exe
-            dist/ugc-cutter
+          path: ${{ runner.os == 'Windows' && 'dist/ugc-cutter-setup.exe' || 'dist/ugc-cutter' }}
           if-no-files-found: error
 
   release:
