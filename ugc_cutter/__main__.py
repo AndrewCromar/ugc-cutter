@@ -41,10 +41,17 @@ def self_test(folder):
         print("FAIL: no clips opened")
         return 1
     print("clips:", [(c.name, round(c.duration, 2)) for c in window.cuts.clips])
-    window.toggle_play()
+
+    def begin_when_fast():
+        if window.player.merged:
+            results["fast"] = True
+            QTimer.singleShot(500, window.toggle_play)
+            QTimer.singleShot(int(float(os.environ.get("UGC_SELF_TEST_SECONDS", "4")) * 1000), finish)
+        else:
+            QTimer.singleShot(100, begin_when_fast)
 
     def finish():
-        crossed = window.player.clip_index
+        results["time"] = round(window.player.time, 2)
         window.cuts.add_cut(window.cuts.total / 3)
         window.cuts.toggle(0.0)
         out = Path(folder) / "self-test-out"
@@ -55,14 +62,15 @@ def self_test(folder):
         out.rmdir()
         window.cuts.dirty = False
         print(f"frames: {results['frames']}  size: {results['size']}  rotation: {results['rotation']}  "
-              f"reached clip: {crossed}  errors: {results['errors']}")
+              f"reached: {results['time']} s  errors: {results['errors']}")
         print(text)
-        results["ok"] = results["frames"] > 0 and not results["errors"] and "cut\t" in text
+        results["ok"] = (results["frames"] > 0 and not results["errors"] and "cut\t" in text
+                         and results.get("fast") and results["time"] > 2.2)
         window.close()
         app.quit()
 
-    QTimer.singleShot(int(float(os.environ.get("UGC_SELF_TEST_SECONDS", "4")) * 1000), finish)
-    QTimer.singleShot(60000, app.quit)  # never hang a build
+    begin_when_fast()
+    QTimer.singleShot(90000, app.quit)  # never hang a build
     app.exec()
     verdict = "SELF TEST OK" if results.get("ok") else "SELF TEST FAILED"
     print(verdict)
@@ -73,6 +81,9 @@ def self_test(folder):
 
 def main():
     args = sys.argv[1:]
+    if args[:1] == ["--worker"]:
+        from .worker import main as worker_main
+        return worker_main(args[1:])
     if args[:1] == ["--self-test"]:
         return self_test(args[1])
     from PySide6.QtWidgets import QApplication

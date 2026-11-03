@@ -51,3 +51,12 @@ pip install -r requirements.txt
 python run.py [folder]
 python -m pytest tests      # add pytest first
 ```
+
+## How playback stays fast
+
+Phone HEVC video is slow to jump around in, and switching between files takes over a second. So when you open a folder, the app makes one small copy of the whole timeline in the background. The label next to Keeping shows its progress, and it takes over when ready. The copy only affects playback: cuts are saved against your original clips, and the copy is kept in your user cache folder, never next to your footage. All video reading runs in a separate worker process, so the window stays responsive.
+
+## To do
+
+- An Update button that installs the latest build from GitHub.
+- An easy installer.

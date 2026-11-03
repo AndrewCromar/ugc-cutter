@@ -1,9 +1,12 @@
 """The window: video on top, timeline underneath."""
+import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, QSettings, QStandardPaths, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QStandardPaths, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -11,8 +14,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QHBoxLayout
                                QPushButton, QScrollBar, QVBoxLayout, QWidget)
 from PySide6.QtCore import QPointF
 
-from .media import ENVELOPE_RATE, cached_envelope, scan_folder
-from .model import CUTS_FILE, CutList
+from .model import CUTS_FILE, ENVELOPE_RATE, Clip, CutList
 
 FRAME = 1 / 30
 LINE_GRAB_PX = 6  # a right click this close to a placed line removes it
@@ -30,26 +32,111 @@ def clock(t):
     return f"{int(t // 60)}:{t % 60:05.2f}"
 
 
-class WaveformLoader(QThread):
-    """Reads each clip's audio in the background so the window opens straight away."""
+def worker_command():
+    """How to start this same program as a worker, whether it's the built app or running from source."""
+    if getattr(sys, "frozen", False):
+        return sys.executable, ["--worker"]
+    return sys.executable, ["-m", "ugc_cutter", "--worker"]
+
+
+def start_worker(process, args):
+    program, first = worker_command()
+    if not getattr(sys, "frozen", False):
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
+        process.setProcessEnvironment(env)
+    process.setProcessChannelMode(QProcess.ForwardedChannels)
+    process.start(program, first + [str(a) for a in args])
+
+
+class EventFile:
+    """Reads the lines a worker has added to its events file so far."""
+
+    def __init__(self, path):
+        self.path, self.position, self.partial = Path(path), 0, ""
+
+    def read(self):
+        if not self.path.exists():
+            return []
+        with open(self.path, encoding="utf-8") as f:
+            f.seek(self.position)
+            text = f.read()
+            self.position = f.tell()
+        lines = (self.partial + text).split("\n")
+        self.partial = lines.pop()
+        return [json.loads(line) for line in lines if line]
+
+
+class BackgroundLoader(QObject):
+    """Has a worker read each clip's audio and make its fast-playback copy, while the window stays free."""
     loaded = Signal(int, object)
+    proxy_ready = Signal(int, object)
+    proxy_failed = Signal(int, str)
+    merged_ready = Signal(object)
 
-    def __init__(self, clips, cache_dir):
-        super().__init__()
-        self.clips, self.cache_dir = clips, cache_dir
+    def __init__(self, clips, cache_dir, proxies=True, parent=None):
+        super().__init__(parent)
+        self.work_dir = tempfile.TemporaryDirectory(prefix="ugc-cutter-")
+        work = Path(self.work_dir.name)
+        (work / "job.json").write_text(json.dumps({
+            "cache": str(cache_dir), "proxies": proxies,
+            "clips": [{"path": str(c.path), "duration": c.duration} for c in clips]}), encoding="utf-8")
+        self.events = EventFile(work / "events.jsonl")
+        self.process = QProcess(self)
+        start_worker(self.process, ["prepare", work / "job.json", work / "events.jsonl"])
+        self.timer = QTimer(self)
+        self.timer.setInterval(100)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start()
 
-    def run(self):
-        for i, clip in enumerate(self.clips):
-            if self.isInterruptionRequested():
-                return
-            try:
-                self.loaded.emit(i, cached_envelope(clip, self.cache_dir))
-            except Exception as e:  # a waveform is only a help, so carry on without this one
-                print(f"no waveform for {clip.name}: {e}", file=sys.stderr)
+    def _poll(self):
+        for event in self.events.read():
+            kind = event["kind"]
+            if kind == "waveform":
+                self.loaded.emit(event["index"], np.load(event["path"]))
+            elif kind == "proxy":
+                self.proxy_ready.emit(event["index"], event["path"])
+            elif kind == "proxy_failed":
+                self.proxy_failed.emit(event["index"], event["error"])
+            elif kind == "merged":
+                self.merged_ready.emit(event["path"])
+        if self.process.state() == QProcess.NotRunning:
+            self.timer.stop()
+
+    def stop(self):
+        self.timer.stop()
+        if self.process.state() != QProcess.NotRunning:
+            self.process.kill()
+            self.process.waitForFinished(3000)
+        self.work_dir.cleanup()
+
+
+def scan_with_worker(folder, on_progress):
+    """Reads the clips in a folder using a worker. Returns (clips, failed)."""
+    with tempfile.TemporaryDirectory(prefix="ugc-cutter-") as work:
+        events = EventFile(Path(work) / "events.jsonl")
+        process = QProcess()
+        start_worker(process, ["scan", folder, Path(work) / "events.jsonl"])
+        result = None
+        while result is None:
+            running = process.state() != QProcess.NotRunning
+            for event in events.read():
+                if event["kind"] == "progress":
+                    on_progress(event["n"], event["total"], event["name"])
+                elif event["kind"] == "scanned":
+                    result = event
+            if result is None and not running:
+                raise RuntimeError(f"couldn't read the folder (worker error: {process.exitCode()})")
+            if result is None:
+                process.waitForFinished(30)
+                QApplication.processEvents()
+        process.waitForFinished(3000)
+    return [Clip(Path(c["path"]), c["duration"]) for c in result["clips"]], result["failed"]
 
 
 class Timeline(QWidget):
     seek_requested = Signal(float)
+    scrub_requested = Signal(float)
     changed = Signal()
 
     def __init__(self, parent=None):
@@ -167,7 +254,7 @@ class Timeline(QWidget):
 
     def mouseMoveEvent(self, event):
         if self.cuts and event.buttons() & Qt.LeftButton:
-            self.seek_requested.emit(self.t_of(event.position().x()))
+            self.scrub_requested.emit(self.t_of(event.position().x()))
 
     # --- drawing
     def paintEvent(self, event):
@@ -243,6 +330,19 @@ class Player(QObject):
         self.want_play = False
         self.skip_red = False
         self.time = 0.0
+        self.proxies = {}  # clip index -> fast-playback copy
+        self.merged = None  # all the clips as one fast file: the timeline time is the file's time
+        self.opening = False
+        self.settle_target = None
+        self.settle_timer = QTimer(self)
+        self.settle_timer.setSingleShot(True)
+        self.settle_timer.setInterval(120)
+        self.settle_timer.timeout.connect(self._settle)
+        self.scrub_target = None
+        self.scrub_timer = QTimer(self)
+        self.scrub_timer.setSingleShot(True)
+        self.scrub_timer.setInterval(40)
+        self.scrub_timer.timeout.connect(self._apply_scrub)
         self.media.mediaStatusChanged.connect(self._on_status)
         self.media.errorOccurred.connect(lambda _e, text: self.problem.emit(text))
         self.ticker = QTimer(self)
@@ -254,6 +354,9 @@ class Player(QObject):
         self.cuts = cuts
         self.clip_index = None
         self.want_play = False
+        self.pending = None
+        self.proxies = {}
+        self.merged = None
         self.media.stop()
         self.seek(0.0)
 
@@ -261,15 +364,62 @@ class Player(QObject):
     def playing(self):
         return self.want_play
 
+    def add_proxy(self, index, path):
+        """A clip's fast copy, used the next time that clip opens if they can't all share one file."""
+        self.proxies[index] = path
+
+    def use_merged(self, path):
+        """Switch to the one-file timeline, carrying on from the same place."""
+        self.merged = path
+        self.clip_index = None
+        self._open(path, self.time)
+
+    def _open(self, path, position):
+        """Open a file and go to a position in it. The player can report the old file's status after a new
+        one is set, so a file only counts as open once it has been seen loading."""
+        self.pending = position
+        self.opening = True
+        self.media.setSource(QUrl.fromLocalFile(str(path)))
+        if self.want_play:
+            self.media.play()
+        else:
+            self.media.pause()  # a paused player that wasn't told again after a new file never shows a frame
+
+    def _settle(self):
+        """A position set in the moment a file opens can be lost, so check that it landed."""
+        target, self.settle_target = self.settle_target, None
+        if target is not None and self.pending is None and not self.want_play \
+                and abs(self.media.position() / 1000 - target) > 0.05:
+            self.media.setPosition(int(target * 1000))
+
+    def scrub(self, t):
+        """Dragging sends far more positions than can be shown: go to the newest one, a frame at a time."""
+        self.scrub_target = t
+        self.time = min(max(0.0, t), self.cuts.total) if self.cuts else 0.0
+        self.position_changed.emit(self.time)
+        if not self.scrub_timer.isActive():
+            self.scrub_timer.start()
+
+    def _apply_scrub(self):
+        if self.scrub_target is not None:
+            target, self.scrub_target = self.scrub_target, None
+            self.seek(target)
+
     def seek(self, t):
         if not self.cuts:
             return
         self.time = min(max(0.0, t), self.cuts.total)
+        if self.merged:
+            if self.pending is not None:
+                self.pending = self.time
+            else:
+                self.media.setPosition(int(self.time * 1000))
+            self.position_changed.emit(self.time)
+            return
         index, local = self.cuts.clip_at(self.time)
         if index != self.clip_index:
             self.clip_index = index
-            self.pending = local
-            self.media.setSource(QUrl.fromLocalFile(str(self.cuts.clips[index].path)))
+            self._open(self.proxies.get(index, self.cuts.clips[index].path), local)
         elif self.pending is not None:
             self.pending = local  # the clip is still opening: go here once it has
         else:
@@ -289,22 +439,34 @@ class Player(QObject):
             return  # _on_status starts it once the clip has opened
         if playing:
             if self.media.mediaStatus() == QMediaPlayer.EndOfMedia:
-                self.media.setPosition(int(self.cuts.clip_at(self.time)[1] * 1000))
+                local = self.time if self.merged else self.cuts.clip_at(self.time)[1]
+                self.media.setPosition(int(local * 1000))
             self.media.play()
         else:
             self.media.pause()
 
     def _on_status(self, status):
-        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and self.pending is not None:
+        if status == QMediaPlayer.LoadingMedia:
+            self.opening = False
+        elif status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and self.pending is not None \
+                and not self.opening:
             local, self.pending = self.pending, None
             self.media.setPosition(int(local * 1000))
+            self.settle_target = local
+            self.settle_timer.start()
             if self.want_play:
                 self.media.play()
             else:
                 self.media.pause()  # shows the frame at this position
         elif status == QMediaPlayer.EndOfMedia and self.want_play and self.cuts:
-            if self.clip_index + 1 < len(self.cuts.clips):
-                self.seek(self.cuts.clips[self.clip_index + 1].offset)
+            if not self.merged and self.clip_index + 1 < len(self.cuts.clips):
+                next_start = self.cuts.clips[self.clip_index + 1].offset
+                target = self.cuts.next_kept_start(next_start) if self.skip_red else next_start
+                if target is None:
+                    self.set_playing(False)
+                    self.seek(self.cuts.total)
+                else:
+                    self.seek(target)
             else:
                 self.want_play = False
                 self.time = self.cuts.total
@@ -313,13 +475,16 @@ class Player(QObject):
             self.want_play = False
 
     def _tick(self):
-        if not (self.cuts and self.want_play and self.pending is None and self.clip_index is not None):
+        if not (self.cuts and self.want_play and self.pending is None and (self.merged or self.clip_index is not None)):
             return
         if self.media.playbackState() != QMediaPlayer.PlayingState:
             return
-        self.time = self.cuts.clips[self.clip_index].offset + self.media.position() / 1000
-        if self.skip_red and not self.cuts.sections[self.cuts.section_index(self.time)].keep:
-            target = self.cuts.next_kept_start(self.time)
+        offset = 0.0 if self.merged else self.cuts.clips[self.clip_index].offset
+        self.time = min(offset + self.media.position() / 1000, self.cuts.total)
+        # look one tick ahead, so a red section is jumped over rather than heard for a moment
+        ahead = min(self.time + self.ticker.interval() / 1000, self.cuts.total - 0.001)
+        if self.skip_red and not self.cuts.sections[self.cuts.section_index(ahead)].keep:
+            target = self.cuts.next_kept_start(ahead)
             if target is None:
                 self.set_playing(False)
                 self.seek(self.cuts.total)
@@ -345,6 +510,7 @@ class MainWindow(QMainWindow):
 
         self.timeline = Timeline()
         self.timeline.seek_requested.connect(self.player.seek)
+        self.timeline.scrub_requested.connect(self.player.scrub)
         self.timeline.changed.connect(self._refresh)
         self.player.position_changed.connect(self._on_position)
         self.player.problem.connect(lambda text: self.statusBar().showMessage(f"Playback problem: {text}"))
@@ -366,6 +532,8 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("0:00.00")
         self.time_label.setFont(QFont("monospace", 11))
         self.summary = QLabel("")
+        self.fast_label = QLabel("")
+        self.fast_label.setStyleSheet("color: #888;")
         for w in (open_button, self.play_button, self.skip_box, fit_button, self.save_button):
             w.setFocusPolicy(Qt.NoFocus)
 
@@ -373,6 +541,7 @@ class MainWindow(QMainWindow):
         for w in (open_button, self.play_button, self.time_label, self.skip_box, fit_button):
             row.addWidget(w)
         row.addStretch(1)
+        row.addWidget(self.fast_label)
         row.addWidget(self.summary)
         row.addWidget(self.save_button)
 
@@ -413,8 +582,12 @@ class MainWindow(QMainWindow):
         self.folder = Path(folder)
         self.statusBar().showMessage("Reading clips...")
         QApplication.processEvents()
-        clips, failed = scan_folder(folder, lambda n, total, name: (
-            self.statusBar().showMessage(f"Reading clip {n} of {total}: {name}"), QApplication.processEvents()))
+        try:
+            clips, failed = scan_with_worker(folder, lambda n, total, name: self.statusBar().showMessage(
+                f"Reading clip {n} of {total}: {name}"))
+        except RuntimeError as e:
+            self.statusBar().showMessage(str(e))
+            return False
         if not clips:
             self.cuts = None
             self.timeline.cuts = None
@@ -434,19 +607,34 @@ class MainWindow(QMainWindow):
             message += ". Couldn't open: " + ", ".join(name for name, _ in failed)
         self.timeline.set_cuts(self.cuts)
         self.player.set_cuts(self.cuts)
-        cache = Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / "waveforms"
-        self.loader = WaveformLoader(clips, cache)
+        self.fast_label.setText(f"Preparing fast playback: 0 of {len(clips)}")
+        cache = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        self.loader = BackgroundLoader(clips, cache, proxies=not os.environ.get("UGC_NO_PROXIES"), parent=self)
         self.loader.loaded.connect(lambda i, env: self.timeline.set_envelope(clips[i], env))
-        self.loader.start()
+        self.proxies_done = 0
+        self.loader.proxy_ready.connect(self._on_proxy)
+        self.loader.merged_ready.connect(self._on_merged)
+        self.loader.proxy_failed.connect(lambda i, error: self.statusBar().showMessage(
+            f"Couldn't make a fast copy of {clips[i].name}, so it will play slower: {error}"))
         self._refresh()
         self.statusBar().showMessage(message)
         return True
 
     def _stop_loader(self):
         if self.loader:
-            self.loader.requestInterruption()
-            self.loader.wait()
+            self.loader.stop()
+            self.loader.setParent(None)
             self.loader = None
+
+    def _on_proxy(self, index, path):
+        self.player.add_proxy(index, path)
+        self.proxies_done += 1
+        total = len(self.cuts.clips)
+        self.fast_label.setText(f"Preparing fast playback: {self.proxies_done} of {total}")
+
+    def _on_merged(self, path):
+        self.player.use_merged(path)
+        self.fast_label.setText("Fast playback ready")
 
     # --- actions
     def toggle_play(self):

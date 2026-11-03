@@ -9,6 +9,7 @@ from pathlib import Path
 CUTS_FILE = "cuts.txt"
 HEADER = "# ugc-cutter cuts v1: action<TAB>clip<TAB>start seconds<TAB>end seconds, times are within the clip"
 MIN_SECTION = 0.02  # seconds: never make a section shorter than this
+ENVELOPE_RATE = 100  # waveform points per second
 
 
 @dataclass

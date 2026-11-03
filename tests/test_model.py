@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from ugc_cutter.media import scan_folder
+import av
+
+from ugc_cutter.media import make_merged, make_proxy, scan_folder
 from ugc_cutter.model import Clip, CutList
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -102,3 +104,17 @@ def test_clips_come_back_in_filming_order_not_name_order():
     clips, failed = scan_folder(FIXTURES)
     assert failed == []
     assert [c.name for c in clips] == ["z-filmed-first.mov", "a-filmed-second.mov"]
+
+
+def test_fast_copies_stand_upright_and_join_with_every_clip_in_its_place(tmp_path):
+    clips, _ = scan_folder(FIXTURES)
+    cuts = CutList(clips)
+    proxies = [make_proxy(c, tmp_path) for c in clips]
+    merged = make_merged(clips, proxies, tmp_path)
+    with av.open(str(merged)) as c:
+        v = c.streams.video[0]
+        assert (v.width, v.height) == (360, 640)  # the 192x108 test clips are stored sideways
+        assert abs(c.duration / av.time_base - cuts.total) < 0.1
+        times = [float(f.pts * f.time_base) for f in c.decode(video=0)]
+    assert times == sorted(times)
+    assert any(abs(t - clips[1].offset) < 0.05 for t in times)  # the second clip starts where it should
