@@ -61,18 +61,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install it and test the installed app with HEVC iPhone-style clips
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "installed"
-          $setup = Start-Process dist\ugc-cutter-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=`"$dir`"" -Wait -PassThru
+          # -Wait would also wait for the app the installer opens at the end, which never closes here,
+          # so wait for the installer itself only, then close the app it opened
+          $setup = Start-Process dist\ugc-cutter-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=`"$dir`"" -PassThru
+          if (-not $setup.WaitForExit(300000)) { Write-Error "installer took too long"; exit 1 }
           if ($setup.ExitCode -ne 0) { Write-Error "installer failed: $($setup.ExitCode)"; exit 1 }
-          Stop-Process -Name ugc-cutter -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+          $opened = Get-Process -Name ugc-cutter -ErrorAction SilentlyContinue
+          if (-not $opened) { Write-Error "the installer didn't open the app"; exit 1 }
+          $opened | Stop-Process -Force
           $env:UGC_SELF_TEST_LOG = "$PWD\self-test.log"
-          $test = Start-Process "$dir\ugc-cutter.exe" -ArgumentList "--self-test","tests\fixtures" -Wait -PassThru
+          $test = Start-Process "$dir\ugc-cutter.exe" -ArgumentList "--self-test","tests\fixtures" -PassThru
+          if (-not $test.WaitForExit(180000)) { Write-Error "self test took too long"; exit 1 }
           Get-Content self-test.log
           if ($test.ExitCode -ne 0) { Write-Error "self test failed: $($test.ExitCode)"; exit 1 }
           if (-not (Select-String -Path self-test.log -SimpleMatch $env:APP_VERSION)) { Write-Error "wrong version"; exit 1 }
-          $uninstall = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          $uninstall = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -PassThru
+          if (-not $uninstall.WaitForExit(120000)) { Write-Error "uninstaller took too long"; exit 1 }
           if ($uninstall.ExitCode -ne 0) { Write-Error "uninstaller failed"; exit 1 }
 
       - uses: actions/upload-artifact@v4
