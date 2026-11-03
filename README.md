@@ -9,7 +9,7 @@ Download from [the latest release](../../releases/tag/latest):
 - **Windows:** `ugc-cutter.exe`. Windows may warn about an unknown app the first time: choose More info, then Run anyway. It takes a few seconds to start.
 - **Linux:** `ugc-cutter`. Run `chmod +x ugc-cutter` once.
 
-Every push to `main` builds and tests both, then replaces that release.
+Every push builds and tests both. A push to `main` also replaces that release. Pushes to `dev` only keep the builds on their Actions run, to try before merging.
 
 ## Use it
 
