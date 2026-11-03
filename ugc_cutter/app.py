@@ -551,7 +551,7 @@ class Player(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("UGC Cutter")
+        self.setWindowTitle(f"UGC Cutter {VERSION}")
         self.resize(1200, 860)
         self.folder = None
         self.cuts = None
@@ -793,4 +793,4 @@ class MainWindow(QMainWindow):
         kept = sum(s.end - s.start for s in self.cuts.sections if s.keep)
         self.summary.setText(f"Keeping {clock(kept)}")
         name = self.folder.name if self.folder else ""
-        self.setWindowTitle(f"{'*' if self.cuts.dirty else ''}{name} - UGC Cutter")
+        self.setWindowTitle(f"{'*' if self.cuts.dirty else ''}{name} - UGC Cutter {VERSION}")
